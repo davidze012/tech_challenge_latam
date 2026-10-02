@@ -62,6 +62,8 @@ extend-include = ["*.ipynb"]
 extend-exclude = ["challenge/exploration.ipynb"]
 output-format = "concise"
 
+line-length = 100
+
 [tool.ruff.lint]
 select = [
     # pycodestyle
