@@ -1,0 +1,11 @@
+**
+!pyproject.toml
+!uv.lock
+!.python-version
+!challenge/
+!assets/
+
+challenge/exploration.ipynb
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store

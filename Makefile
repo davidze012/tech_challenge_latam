@@ -1,18 +1,18 @@
 .ONESHELL:
 
 .PHONY: help
-help:             ## Show the help.
+help:             
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Targets:"
 	@fgrep "##" Makefile | fgrep -v fgrep
 
 .PHONY: venv
-venv:             ## Create the virtual environment
+venv:
 	uv venv
 
 .PHONY: install
-install:          ## Install all dependencies (runtime + dev + test)
+install:          ## Install all dependencies
 	uv sync --all-extras
 
 .PHONY: install-dev
@@ -23,18 +23,36 @@ install-dev:      ## Install runtime + dev extras only
 install-test:     ## Install runtime + test extras only
 	uv sync --extra test
 
+# --- Code quality ---
+
+.PHONY: lint
+lint:             ## Lint the repo and check formatting of the package
+	uv run ruff check .
+	uv run ruff format --check challenge
+
+.PHONY: format
+format:           ## Auto-fix lint findings and format the package
+	uv run ruff check --fix challenge
+	uv run ruff format challenge
+
+.PHONY: audit
+audit:            ## pip audit
+	mkdir reports || true
+	uv export --frozen --all-extras --no-emit-project --format requirements-txt -o reports/requirements-audit.txt
+	uv run pip-audit --disable-pip --no-deps -r reports/requirements-audit.txt
+
 # --- Local deployment ---
 
 .PHONY: run-api-local
-run-api-local:          ## Start the API server locally (port 8000)
+run-api-local:          ## Start the API server locally
 	DEPLOYMENT_MODE=local uv run uvicorn challenge.api:app --host 0.0.0.0 --port 8000
 
 .PHONY: training-local
-training-local:   ## Run the training job locally (reads data/data.csv, no GCP credentials needed)
+training-local:   ## Run the training job locally
 	DEPLOYMENT_MODE=local uv run python -m challenge.training
 
 .PHONY: serving-local
-serving-local:    ## Run the serving job locally (reads local artifacts, no GCP credentials needed)
+serving-local:    ## Run the serving job locally
 	DEPLOYMENT_MODE=local uv run python -m challenge.serving
 
 # --- Tests ---
@@ -44,7 +62,7 @@ model-test:       ## Run model unit tests with coverage
 	mkdir reports || true
 	uv run pytest --cov-config=.coveragerc --cov-report term --cov-report html:reports/html --cov-report xml:reports/coverage.xml --junitxml=reports/junit.xml --cov=challenge tests/model
 
-.PHONY: pipeline-test
+.PHONY: pipelines-test
 pipelines-test:    ## Run pipeline integration tests with coverage
 	mkdir reports || true
 	uv run pytest --cov-config=.coveragerc --cov-report term --cov-report html:reports/html --cov-report xml:reports/coverage.xml --junitxml=reports/junit.xml --cov=challenge tests/pipelines
@@ -57,6 +75,6 @@ api-test:         ## Run API tests with coverage
 STRESS_URL = http://127.0.0.1:8000
 
 .PHONY: stress-test
-stress-test:      ## Locust stress test (100 users, 60s, headless) — requires running API at STRESS_URL
+stress-test:      ## Locust stress test
 	mkdir reports || true
 	uv run locust -f tests/stress/api_stress.py --print-stats --html reports/stress-test.html --run-time 60s --headless --users 100 --spawn-rate 1 -H $(STRESS_URL)
