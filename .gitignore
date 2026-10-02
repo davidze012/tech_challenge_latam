@@ -1,0 +1,51 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# --- Tooling caches & reports ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+reports/
+
+# --- Local pipeline outputs ---
+artifacts/
+tests/artifacts/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Terraform ---
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+terraform.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+*-key.json
+credentials*.json
+
+# --- OS / IDE ---
+.DS_Store
+.idea/
+.vscode/
