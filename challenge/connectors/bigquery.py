@@ -83,8 +83,7 @@ class BigQueryClient:
         return data
 
     def write(self, predictions: list[int], identifiers: pd.DataFrame) -> None:
-        """Insert predictions into the configured BigQuery predictions table.
-        """
+        """Insert predictions into the configured BigQuery predictions table."""
         frame = build_predictions_frame(predictions, identifiers)
         table_id = self.table_id(get_settings().bq_predictions_table)
         job_config = bigquery.LoadJobConfig(

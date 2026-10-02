@@ -79,7 +79,7 @@ class LocalCSVClient:
     def write(self, predictions: list[int], identifiers: pd.DataFrame) -> None:
         """Write predictions to ``<ARTIFACTS_DIR>/predictions.csv``.
 
-        Output columns: 
+        Output columns:
         ``OPERA``, ``TIPOVUELO``, ``MES`` (row-aligned with
         predictions) followed by ``prediction`` (0|1).
         """

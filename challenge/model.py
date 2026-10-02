@@ -62,8 +62,7 @@ def _to_datetime(values: pd.Series) -> pd.Series:
 def compute_delay(
     data: pd.DataFrame, threshold_minutes: int = DELAY_THRESHOLD_MINUTES
 ) -> pd.Series:
-    """Return the delay label: 1 if ``Fecha-O - Fecha-I > threshold_minutes``, else 0.
-    """
+    """Return the delay label: 1 if ``Fecha-O - Fecha-I > threshold_minutes``, else 0."""
     _require_columns(data, DATE_COLUMNS)
     scheduled, operated = (_to_datetime(data[column]) for column in DATE_COLUMNS)
     min_diff = (operated - scheduled).dt.total_seconds() / 60
@@ -72,8 +71,7 @@ def compute_delay(
 
 
 class BaseDelayModel(ABC):
-    """ Base model - derived from the notebook
-    """
+    """Base model - derived from the notebook"""
 
     def __init__(self) -> None:
         self._model = None  # fitted XGBClassifier, populated by fit()
@@ -130,8 +128,7 @@ class BaseDelayModel(ABC):
 
 
 class GCPModelMixin:
-    """Optional GCP I/O operations.
-    """
+    """Optional GCP I/O operations."""
 
     def __init__(
         self,
@@ -222,16 +219,14 @@ class GCPModelMixin:
 
 
 class DelayModel(GCPModelMixin, BaseDelayModel):
-    """Balanced XGBoost classifier that predicts if a SCL flight departs >15 min late.
-    """
+    """Balanced XGBoost classifier that predicts if a SCL flight departs >15 min late."""
 
     def preprocess(
         self,
         data: pd.DataFrame,
         target_column: str | None = None,
     ) -> tuple[pd.DataFrame, pd.DataFrame] | pd.DataFrame:
-        """Prepare raw data for training or inference.
-        """
+        """Prepare raw data for training or inference."""
         features = self._build_features(data)
         if target_column is None:
             return features
@@ -255,7 +250,7 @@ class DelayModel(GCPModelMixin, BaseDelayModel):
             {
                 "OPERA": data["OPERA"].astype("string").str.strip(),
                 "TIPOVUELO": data["TIPOVUELO"].astype("string").str.strip().str.upper(),
-                # Nullable Int64 (BigQuery's INT64 dtype) 
+                # Nullable Int64 (BigQuery's INT64 dtype)
                 # yields MES_7, not MES_7.0.
                 "MES": month.where(month == month.round()).astype("Int64"),
             },

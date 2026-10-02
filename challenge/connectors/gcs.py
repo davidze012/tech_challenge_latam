@@ -122,8 +122,7 @@ class GCSArtifactStore:
 
 
 class GCSCSVClient:
-    """Read flight data as a CSV object from the GCS input bucket.
-    """
+    """Read flight data as a CSV object from the GCS input bucket."""
 
     def __init__(self, blob_name: str, _bq_writer: Any | None = None) -> None:
         """Initialise with the input-bucket object name and an optional injected writer."""
