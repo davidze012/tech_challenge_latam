@@ -1,0 +1,22 @@
+[
+  {
+    "name": "OPERA",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "TIPOVUELO",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "MES",
+    "type": "INTEGER",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "prediction",
+    "type": "INTEGER",
+    "mode": "NULLABLE"
+  }
+]

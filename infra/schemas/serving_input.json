@@ -1,0 +1,20 @@
+[
+  {
+    "name": "OPERA",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Name of the operating airline"
+  },
+  {
+    "name": "TIPOVUELO",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Flight type: I = international, N = national"
+  },
+  {
+    "name": "MES",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Month of the operation"
+  }
+]
