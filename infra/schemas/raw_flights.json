@@ -1,0 +1,110 @@
+[
+  {
+    "name": "Fecha-I",
+    "type": "DATETIME",
+    "mode": "NULLABLE",
+    "description": "Scheduled date and time of the flight"
+  },
+  {
+    "name": "Vlo-I",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Scheduled flight number (mixed alphanumeric values)"
+  },
+  {
+    "name": "Ori-I",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Scheduled origin city code"
+  },
+  {
+    "name": "Des-I",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Scheduled destination city code"
+  },
+  {
+    "name": "Emp-I",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Scheduled airline code"
+  },
+  {
+    "name": "Fecha-O",
+    "type": "DATETIME",
+    "mode": "NULLABLE",
+    "description": "Date and time of the operated flight"
+  },
+  {
+    "name": "Vlo-O",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Operated flight number"
+  },
+  {
+    "name": "Ori-O",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Operated origin city code"
+  },
+  {
+    "name": "Des-O",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Operated destination city code"
+  },
+  {
+    "name": "Emp-O",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Operated airline code"
+  },
+  {
+    "name": "DIA",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Day of the month of the operation"
+  },
+  {
+    "name": "MES",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Month of the operation"
+  },
+  {
+    "name": "AÑO",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Year of the operation"
+  },
+  {
+    "name": "DIANOM",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Day of the week of the operation"
+  },
+  {
+    "name": "TIPOVUELO",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Flight type: I = international, N = national"
+  },
+  {
+    "name": "OPERA",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Name of the operating airline"
+  },
+  {
+    "name": "SIGLAORI",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Origin city name"
+  },
+  {
+    "name": "SIGLADES",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Destination city name"
+  }
+]

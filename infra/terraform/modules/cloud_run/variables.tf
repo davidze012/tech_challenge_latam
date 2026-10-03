@@ -1,87 +1,85 @@
 variable "project_id" {
-  description = "GCP project that hosts the challenge."
+  description = "GCP project id."
   type        = string
 }
 
 variable "region" {
-  description = "Region of every regional resource."
+  description = "Cloud Run region."
   type        = string
-  default     = "us-central1"
 }
 
 variable "env" {
-  description = "Environment: `staging` or `prod`."
+  description = "Environment name (staging or prod); suffixes every resource name."
   type        = string
-
-  validation {
-    condition     = contains(["staging", "prod"], var.env)
-    error_message = "env must be \"staging\" or \"prod\"."
-  }
 }
 
-variable "service_account_id" {
-  description = "Account id of the single service account created by the bootstrap root."
-  type        = string
-  default     = "mle-challenge-sa"
+variable "labels" {
+  description = "Labels applied to every resource."
+  type        = map(string)
+  default     = {}
 }
 
-# Images are passed by CD as immutable digests
+variable "service_account_email" {
+  description = "Runtime identity of the API and both jobs."
+  type        = string
+}
+
 variable "api_image" {
   description = "Image of the API service."
   type        = string
-  default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }
 
 variable "training_image" {
   description = "Image of the training job."
   type        = string
-  default     = "us-docker.pkg.dev/cloudrun/container/job"
 }
 
 variable "serving_image" {
   description = "Image of the serving job."
   type        = string
-  default     = "us-docker.pkg.dev/cloudrun/container/job"
+}
+
+variable "input_bucket" {
+  description = "Bucket with the raw CSVs."
+  type        = string
+}
+
+variable "artifacts_bucket" {
+  description = "Bucket with model artifacts and metadata."
+  type        = string
+}
+
+variable "dataset_id" {
+  description = "BigQuery dataset id."
+  type        = string
 }
 
 variable "api_min_instances" {
-  description = "Minimum API instances."
+  description = "Minimum API instances (1 keeps it warm)."
   type        = number
-  default     = 0
 }
 
 variable "api_max_instances" {
   description = "Maximum API instances."
   type        = number
-  default     = 2
 }
 
 variable "job_timeout_seconds" {
   description = "Task timeout of the training/serving jobs."
   type        = number
-  default     = 600
 }
 
 variable "pipeline_timeout_seconds" {
   description = "How long the API waits for a job execution before answering 504."
   type        = number
-  default     = 840
 }
 
 variable "request_timeout_seconds" {
-  description = "Cloud Run request timeout of the API."
+  description = "Cloud Run request timeout of the API (max 3600)."
   type        = number
-  default     = 900
 }
 
 variable "results_cache_ttl_seconds" {
   description = "TTL of the API's in-memory predictions cache."
   type        = number
-  default     = 30
-}
-
-variable "labels" {
-  description = "Extra labels for every resource."
-  type        = map(string)
-  default     = {}
 }
