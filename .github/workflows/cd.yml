@@ -1,0 +1,164 @@
+name: CD
+
+# GitFlow: dev → staging, main → prod
+on:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy the selected ref to
+        type: choice
+        options: [staging, prod]
+        default: staging
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  # One deployment per environment at a time.
+  group: cd-${{ inputs.environment || (github.ref_name == 'main' && 'prod' || 'staging') }}
+  cancel-in-progress: false
+
+env:
+  TF_ENV: ${{ inputs.environment || (github.ref_name == 'main' && 'prod' || 'staging') }}
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/mle-challenge
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build & push images
+    needs: ci
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.api.outputs.digest }}
+      training: ${{ steps.training.outputs.digest }}
+      serving: ${{ steps.serving.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+          token_format: access_token
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ${{ vars.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - id: api
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: Dockerfile.api
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          tags: ${{ env.REGISTRY }}/api:${{ github.sha }}
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=mle-challenge
+      - id: training
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: Dockerfile.training
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          tags: ${{ env.REGISTRY }}/training:${{ github.sha }}
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=mle-challenge
+      - id: serving
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: Dockerfile.serving
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          tags: ${{ env.REGISTRY }}/serving:${{ github.sha }}
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=mle-challenge
+
+  deploy:
+    name: Deploy (${{ inputs.environment || (github.ref_name == 'main' && 'prod' || 'staging') }})
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment || (github.ref_name == 'main' && 'prod' || 'staging') }}
+      url: ${{ steps.outputs.outputs.api_url }}
+    outputs:
+      api_url: ${{ steps.outputs.outputs.api_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+      - name: terraform plan
+        run: >-
+          make tf-plan TF_ENV="$TF_ENV" GCP_PROJECT_ID="$GCP_PROJECT_ID" TF_STATE_BUCKET="$TF_STATE_BUCKET"
+          TF_VARS="-var=api_image=$REGISTRY/api@${{ needs.build.outputs.api }}
+          -var=training_image=$REGISTRY/training@${{ needs.build.outputs.training }}
+          -var=serving_image=$REGISTRY/serving@${{ needs.build.outputs.serving }}"
+      - name: terraform apply
+        run: make tf-apply TF_ENV="$TF_ENV"
+      - id: outputs
+        name: Outputs
+        run: |
+          api_url=$(terraform -chdir=infra/terraform output -raw api_url)
+          echo "api_url=$api_url" >> "$GITHUB_OUTPUT"
+          echo "### Deployed \`$TF_ENV\`: $api_url" >> "$GITHUB_STEP_SUMMARY"
+
+  e2e:
+    name: End-to-end checks (${{ inputs.environment || (github.ref_name == 'main' && 'prod' || 'staging') }})
+    needs: deploy
+    runs-on: ubuntu-latest
+    env:
+      API_URL: ${{ needs.deploy.outputs.api_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Smoke test
+        run: |
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 3 "$API_URL/health" | jq -e '.status == "ok"'
+          curl -fsS "$API_URL/pipeline/predict/results?page=1&page_size=5" | jq -e '.page == 1'
+      - name: Train (runs the training Cloud Run job, quality gate enforced)
+        run: |
+          response=$(curl -fsS --max-time 900 -X POST "$API_URL/pipeline/train")
+          echo "$response" | jq .
+          echo "$response" | jq -e '.model_display_name == "delay-classifier" and .metrics.recall_1 >= 0.60 and .metrics.f1_1 >= 0.30'
+      - name: Predict (runs the serving Cloud Run job)
+        run: |
+          response=$(curl -fsS --max-time 900 -X POST "$API_URL/pipeline/predict")
+          echo "$response" | jq '{pipeline_job_id, model_version, total_predictions}'
+          echo "$response" | jq -e '.total_predictions == 100 and (.predictions | length) == 10'
+      - name: Paginated, filtered results
+        run: |
+          curl -fsS "$API_URL/pipeline/predict/results?page=2&page_size=5&tipovuelo=I" \
+            | jq -e '.page == 2 and .page_size == 5 and .total_predictions > 0 and (.predictions | length) == 5'
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$API_URL/pipeline/predict/results?mes=13")" = "422"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Stress test against the deployed API
+        run: |
+          uv sync --frozen --extra test
+          make stress-test STRESS_URL="$API_URL"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: stress-test-${{ env.TF_ENV }}
+          path: reports/stress-test.html

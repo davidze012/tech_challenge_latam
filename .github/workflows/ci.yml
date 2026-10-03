@@ -1,0 +1,228 @@
+name: CI
+
+# Quality gate for every change.
+on:
+  pull_request:
+  push:
+    branches: ["feature/**", "release/**", "hotfix/**"]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint & dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: true
+      - name: Lockfile is up to date
+        run: uv lock --check
+      - run: uv sync --frozen --all-extras
+      - name: Ruff (lint + format)
+        run: make lint
+      - name: pip-audit (known vulnerabilities)
+        run: make audit
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Gitleaks (full history)
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.0 git /repo --redact --verbose
+
+  test:
+    name: Tests (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [model, pipelines, api]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - run: make ${{ matrix.suite }}-test
+      - name: Coverage summary
+        if: always()
+        run: |
+          echo "### Coverage — ${{ matrix.suite }}" >> "$GITHUB_STEP_SUMMARY"
+          uv run coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: reports-${{ matrix.suite }}
+          path: reports/
+
+  stress:
+    name: Stress test (local API)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - name: Train and serve locally (artifacts/ + predictions.csv)
+        run: make training-local && make serving-local
+      - name: Start the API
+        run: |
+          make run-api-local > api.log 2>&1 &
+          curl -fsS --retry 30 --retry-all-errors --retry-delay 1 http://127.0.0.1:8000/health
+      - name: Locust (100 users, 60 s) — fails on any error
+        run: make stress-test
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: stress-test
+          path: |
+            reports/stress-test.html
+            api.log
+
+  docker:
+    name: Docker build, scan & smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387
+        with:
+          dockerfile: Dockerfile.*
+          recursive: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Build api
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: Dockerfile.api
+          platforms: linux/amd64
+          provenance: false
+          load: true
+          tags: mle-challenge-api:ci
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=mle-challenge
+          cache-to: type=gha,mode=max,scope=mle-challenge
+      - name: Build training
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: Dockerfile.training
+          platforms: linux/amd64
+          provenance: false
+          load: true
+          tags: mle-challenge-training:ci
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=mle-challenge
+      - name: Build serving
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: Dockerfile.serving
+          platforms: linux/amd64
+          provenance: false
+          load: true
+          tags: mle-challenge-serving:ci
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=mle-challenge
+      - name: Smoke test the API container (local mode)
+        run: make docker-smoke IMAGE_TAG=ci
+      - name: Trivy (CRITICAL, fixable)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: mle-challenge-api:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  iac:
+    name: Infrastructure as code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+      - name: terraform fmt + validate (both roots)
+        run: make tf-validate
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337
+      - name: TFLint (terraform + google rulesets)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --init --config "$GITHUB_WORKSPACE/infra/terraform/.tflint.hcl"
+          tflint --chdir=infra/terraform --recursive --config "$GITHUB_WORKSPACE/infra/terraform/.tflint.hcl"
+      - name: ShellCheck
+        run: |
+          shopt -s nullglob globstar
+          scripts=(infra/**/*.sh)
+          if (( ${#scripts[@]} )); then shellcheck "${scripts[@]}"; else echo "No shell scripts."; fi
+      - name: Trivy IaC misconfiguration scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: config
+          scan-ref: infra/terraform
+          severity: CRITICAL,HIGH
+          trivyignores: .trivyignore
+          exit-code: "1"
+
+  tf-plan:
+    name: Terraform plan (target environment)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: iac
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_ENV: ${{ github.base_ref == 'main' && 'prod' || 'staging' }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+      - name: Resolve deployed images
+        id: images
+        run: |
+          image() { gcloud run "$1" describe "$2" --project="$GCP_PROJECT_ID" --region="$GCP_REGION" --format="value($3)" 2>/dev/null || true; }
+          vars=""
+          api=$(image services "mle-api-$TF_ENV" "spec.template.spec.containers[0].image")
+          training=$(image jobs "mle-training-$TF_ENV" "spec.template.spec.template.spec.containers[0].image")
+          serving=$(image jobs "mle-serving-$TF_ENV" "spec.template.spec.template.spec.containers[0].image")
+          [ -n "$api" ] && vars="$vars -var=api_image=$api"
+          [ -n "$training" ] && vars="$vars -var=training_image=$training"
+          [ -n "$serving" ] && vars="$vars -var=serving_image=$serving"
+          echo "tf_vars=$vars" >> "$GITHUB_OUTPUT"
+      - name: terraform plan
+        run: make tf-plan TF_ENV="$TF_ENV" GCP_PROJECT_ID="$GCP_PROJECT_ID" TF_STATE_BUCKET="$TF_STATE_BUCKET" TF_VARS="${{ steps.images.outputs.tf_vars }}"
+      - name: Plan summary
+        run: |
+          {
+            echo "### Terraform plan — $TF_ENV"
+            echo '```'
+            terraform -chdir=infra/terraform show -no-color "$TF_ENV.tfplan" | tail -n 120
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -9,7 +9,7 @@ terraform {
   }
 
   # Remote state in the tfstate bucket.
-  # bucket/prefix are passed at init time: see `make tf-bootstrap-init`.
+  # bucket/prefix are passed at init time: see `make tf-bootstrap-plan`.
   backend "gcs" {}
 }
 

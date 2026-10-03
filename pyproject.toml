@@ -48,7 +48,7 @@ test = [
     "httpx>=0.23,<1",
     "locust>=2,<3",
     "mockito>=2,<3",
-    "pytest>=8.4,<9",
+    "pytest>=9.0.3,<10",
     "pytest-cov>=7,<8",
 ]
 
