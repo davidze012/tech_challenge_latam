@@ -47,7 +47,9 @@ class GCSArtifactStore:
         return name
 
     def _bucket(self) -> storage.Bucket:
-        return _storage_client().bucket(self._bucket_name())
+        # Validate the configuration before creating a client.
+        name = self._bucket_name()
+        return _storage_client().bucket(name)
 
     def save(self, model: Any, run_id: str) -> str:
         """Serialize and upload model to GCS; update latest.txt."""

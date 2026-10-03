@@ -212,6 +212,12 @@ class GCPModelMixin:
             raise TypeError(f"{type(self._store).__name__} does not support run metadata")
         return self._store.save_metadata(run_id, metadata)
 
+    def latest_run_id(self) -> str | None:
+        """Return the store's most recent run_id (``None`` if unknown or unsupported)."""
+        if not isinstance(self._store, MetadataStore):
+            return None
+        return self._store.latest_run_id()
+
     @property
     def is_fitted(self) -> bool:
         """Whether an estimator has been trained or loaded."""
@@ -297,6 +303,12 @@ class DelayModel(GCPModelMixin, BaseDelayModel):
             return [0] * len(features)
         predictions = self._model.predict(self._select_features(features))
         return np.asarray(predictions, dtype=int).tolist()
+
+    def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
+        """Return the predicted probability of delay for each row."""
+        if self._model is None:
+            raise RuntimeError("The model is not trained: call fit() or load() first")
+        return self._model.predict_proba(self._select_features(features))[:, 1]
 
     @staticmethod
     def _select_features(features: pd.DataFrame) -> pd.DataFrame:
