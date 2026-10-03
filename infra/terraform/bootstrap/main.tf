@@ -22,6 +22,7 @@ locals {
     "roles/artifactregistry.writer", # push images (CD / Cloud Build)
     "roles/bigquery.dataOwner",      # datasets, tables, predictions writes
     "roles/bigquery.jobUser",        # load and query jobs
+    "roles/bigquery.resourceViewer", # jobs created by other identities (terraform refresh)
     "roles/logging.logWriter",       # application and build logs
     "roles/run.admin",               # services/jobs, public invoker, runWithOverrides
     "roles/storage.admin",           # buckets, artifacts, terraform state
@@ -58,6 +59,14 @@ resource "google_service_account_iam_member" "act_as_itself" {
   service_account_id = google_service_account.pipelines.name
   role               = "roles/iam.serviceAccountUser"
   member             = google_service_account.pipelines.member
+}
+
+resource "google_service_account_iam_member" "operators" {
+  for_each = toset(var.operator_members)
+
+  service_account_id = google_service_account.pipelines.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = each.value
 }
 
 # --- Workload Identity Federation -------------------------------

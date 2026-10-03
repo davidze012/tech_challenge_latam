@@ -21,6 +21,19 @@ resource "google_storage_bucket" "input" {
   public_access_prevention    = "enforced"
   force_destroy               = !local.is_prod
   labels                      = var.labels
+
+  # Protects the raw CSVs against accidental overwrites.
+  versioning {
+    enabled = true
+  }
+  lifecycle_rule {
+    condition {
+      days_since_noncurrent_time = 30
+    }
+    action {
+      type = "Delete"
+    }
+  }
 }
 
 resource "google_storage_bucket" "artifacts" {

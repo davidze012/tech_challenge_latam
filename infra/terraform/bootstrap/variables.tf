@@ -26,3 +26,12 @@ variable "artifact_repository_id" {
   type        = string
   default     = "mle-challenge"
 }
+
+variable "operator_members" {
+  description = <<-EOT
+    Persons allowed to impersonate the service account (e.g. ["user:person@email.com"]), to run
+    Terraform with the exact permissions of CI/CD. Pass it at runtime (TF_VAR_operator_members).
+  EOT
+  type        = list(string)
+  default     = []
+}
