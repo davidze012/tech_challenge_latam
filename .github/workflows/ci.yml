@@ -181,7 +181,7 @@ jobs:
           exit-code: "1"
 
   tf-plan:
-    name: Terraform plan (${{ github.base_ref == 'main' && 'prod' || 'staging' }})
+    name: Terraform plan (target environment)
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     needs: iac
     runs-on: ubuntu-latest

@@ -212,7 +212,9 @@ def test_gcp_query_is_parameterised(gcp_mode):
     client.query_and_wait.return_value = [
         {
             "total": 42,
-            "page_rows": [{"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1}],
+            "page_rows": [
+                {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1}
+            ],
         }
     ]
     with patch.object(utils, "_bigquery_client", return_value=client):
