@@ -23,6 +23,11 @@ PREDICTIONS = pd.DataFrame(
         "prediction": [1, 0, 1, 0, 1],
     }
 )
+EMPTY_RESULT = {
+    "total_predictions": 0,
+    "summary": {"delayed": 0, "on_time": 0, "delay_rate": None},
+    "predictions": [],
+}
 
 
 @pytest.fixture(autouse=True)
@@ -112,6 +117,7 @@ def test_local_query_filters_sorts_and_paginates(local_artifacts):
 
     result = utils._query_predictions(1, 2, ["Grupo LATAM"], None, [7, 12])
     assert result["total_predictions"] == 3
+    assert result["summary"] == {"delayed": 2, "on_time": 1, "delay_rate": 0.6667}
     assert result["predictions"] == [
         {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1},
         {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 12, "predicted_delay": 0},
@@ -119,11 +125,12 @@ def test_local_query_filters_sorts_and_paginates(local_artifacts):
     page_2 = utils._query_predictions(2, 2, ["Grupo LATAM"], None, [7, 12])
     assert [p["TIPOVUELO"] for p in page_2["predictions"]] == ["N"]
     beyond = utils._query_predictions(9, 2, ["Grupo LATAM"], None, None)
-    assert beyond == {"total_predictions": 3, "predictions": []}
+    assert beyond["total_predictions"] == 3
+    assert beyond["predictions"] == []
 
 
 def test_local_query_without_predictions_file_is_empty(local_artifacts):
-    assert utils._query_predictions(1, 10) == {"total_predictions": 0, "predictions": []}
+    assert utils._query_predictions(1, 10) == EMPTY_RESULT
 
 
 def test_cache_key_ignores_filter_order_and_duplicates(local_artifacts):
@@ -212,6 +219,7 @@ def test_gcp_query_is_parameterised(gcp_mode):
     client.query_and_wait.return_value = [
         {
             "total": 42,
+            "delayed": 21,
             "page_rows": [
                 {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1}
             ],
@@ -221,6 +229,7 @@ def test_gcp_query_is_parameterised(gcp_mode):
         result = utils._query_predictions(3, 20, ["Grupo LATAM"], ["I"], [7])
 
     assert result["total_predictions"] == 42
+    assert result["summary"] == {"delayed": 21, "on_time": 21, "delay_rate": 0.5}
     assert result["predictions"][0]["predicted_delay"] == 1
     sql = client.query_and_wait.call_args.args[0]
     assert "`proj.ds.predictions`" in sql
@@ -237,7 +246,7 @@ def test_gcp_query_on_missing_table_is_empty(gcp_mode):
     client = MagicMock()
     client.query_and_wait.side_effect = NotFound("no table")
     with patch.object(utils, "_bigquery_client", return_value=client):
-        assert utils._query_predictions(1, 10) == {"total_predictions": 0, "predictions": []}
+        assert utils._query_predictions(1, 10) == EMPTY_RESULT
 
 
 def test_gcp_raw_flights_uses_table_metadata(gcp_mode):
@@ -363,4 +372,44 @@ def test_results_normalises_filters_and_reports_total_pages():
         )
     assert response.status_code == 200
     assert response.json()["total_pages"] == 3
+    assert response.json()["filters"] == {
+        "opera": ["Copa Air"],
+        "tipovuelo": ["I", "N"],
+        "mes": [7],
+    }
     query.assert_called_once_with(1, 10, ["Copa Air"], ["I", "N"], [7])
+
+
+def test_results_describe_each_prediction_and_the_summary():
+    result = {
+        "total_predictions": 2,
+        "summary": {"delayed": 1, "on_time": 1, "delay_rate": 0.5},
+        "predictions": [
+            {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1},
+            {"OPERA": "Sky Airline", "TIPOVUELO": "N", "MES": None, "predicted_delay": 0},
+        ],
+    }
+    with patch.object(api_module, "_query_predictions", return_value=result):
+        body = client.get("/pipeline/predict/results").json()
+
+    assert body["filters"] == {"opera": None, "tipovuelo": None, "mes": None}
+    assert body["summary"] == {
+        "delayed": 1,
+        "on_time": 1,
+        "delay_rate": 0.5,
+        "delay_threshold_minutes": 15,
+    }
+    assert body["predictions"] == [
+        {
+            **result["predictions"][0],
+            "flight_type": "international",
+            "month_name": "July",
+            "prediction_label": "delayed",
+        },
+        {
+            **result["predictions"][1],
+            "flight_type": "national",
+            "month_name": None,
+            "prediction_label": "on_time",
+        },
+    ]

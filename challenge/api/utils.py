@@ -50,6 +50,7 @@ WITH filtered AS (
 )
 SELECT
   (SELECT COUNT(*) FROM filtered) AS total,
+  (SELECT COUNTIF(prediction = 1) FROM filtered) AS delayed,
   ARRAY(
     SELECT AS STRUCT OPERA, TIPOVUELO, MES, prediction AS predicted_delay
     FROM filtered
@@ -312,8 +313,9 @@ def _query_predictions(
     tipovuelo: list[str] | None = None,
     mes: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Return ``{"total_predictions": int, "predictions": [...]}`` for one filtered page.
+    """Return ``{"total_predictions": int, "summary": {...}, "predictions": [...]}``.
 
+    ``summary`` counts delayed/on-time predictions over every filtered row, not only the page.
     Results are cached for ``RESULTS_CACHE_TTL_S`` seconds per (page, filters) key.
     """
     key = (page, page_size, _normalise(opera), _normalise(tipovuelo), _normalise(mes))
@@ -357,12 +359,13 @@ def _fetch_predictions_bigquery(
             )
         )
     except NotFound:  # serving has not run yet
-        return {"total_predictions": 0, "predictions": []}
+        return _page_result(0, 0, [])
     result = rows[0]
-    return {
-        "total_predictions": int(result["total"]),
-        "predictions": [_prediction_record(row) for row in result["page_rows"]],
-    }
+    return _page_result(
+        int(result["total"]),
+        int(result["delayed"]),
+        [_prediction_record(row) for row in result["page_rows"]],
+    )
 
 
 def _fetch_predictions_local(
@@ -374,7 +377,7 @@ def _fetch_predictions_local(
 ) -> dict[str, Any]:
     path = Path(get_settings().artifacts_dir) / PREDICTIONS_FILENAME
     if not path.is_file():
-        return {"total_predictions": 0, "predictions": []}
+        return _page_result(0, 0, [])
     frame = pd.read_csv(path, dtype={"OPERA": "string", "TIPOVUELO": "string", "MES": "Int64"})
     if opera:
         frame = frame[frame["OPERA"].isin(opera)]
@@ -387,9 +390,23 @@ def _fetch_predictions_local(
     page_rows = frame.iloc[start : start + page_size].rename(
         columns={PREDICTION_COLUMN: "predicted_delay"}
     )
+    return _page_result(
+        len(frame),
+        int(frame[PREDICTION_COLUMN].sum()),
+        [_prediction_record(row) for row in page_rows.to_dict("records")],
+    )
+
+
+def _page_result(total: int, delayed: int, predictions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Assemble a ``_query_predictions`` result; ``delay_rate`` is None when nothing matched."""
     return {
-        "total_predictions": len(frame),
-        "predictions": [_prediction_record(row) for row in page_rows.to_dict("records")],
+        "total_predictions": total,
+        "summary": {
+            "delayed": delayed,
+            "on_time": total - delayed,
+            "delay_rate": round(delayed / total, 4) if total else None,
+        },
+        "predictions": predictions,
     }
 
 

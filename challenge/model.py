@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
+from challenge.config import DELAY_THRESHOLD_MINUTES
 from challenge.connectors.local import LocalArtifactStore, LocalCSVClient
 from challenge.connectors.protocols import (
     IDENTIFIER_COLUMNS,
@@ -33,8 +34,6 @@ FEATURES_COLS: list[str] = [
     "OPERA_Copa Air",
 ]
 TARGET_COLUMN = "delay"
-#: A flight is delayed when it operates more than this many minutes after schedule.
-DELAY_THRESHOLD_MINUTES = 15
 
 #: Raw columns the features are derived from.
 CATEGORICAL_COLUMNS: tuple[str, ...] = IDENTIFIER_COLUMNS

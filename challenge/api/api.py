@@ -1,5 +1,6 @@
 """Pipeline control FastAPI — triggers Cloud Run Job training/serving pipelines."""
 
+import calendar
 import logging
 import threading
 import uuid
@@ -9,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from challenge.api.utils import (
     _check_model_exists,
@@ -23,13 +24,19 @@ from challenge.api.utils import (
     total_pages,
     warm_up,
 )
-from challenge.config import MODEL_DISPLAY_NAME, configure_logging, get_settings
+from challenge.config import (
+    DELAY_THRESHOLD_MINUTES,
+    MODEL_DISPLAY_NAME,
+    configure_logging,
+    get_settings,
+)
 
 logger = logging.getLogger(__name__)
 
 #: One execution per pipeline at a time on this instance.
 _PIPELINE_LOCKS = {"train": threading.Lock(), "predict": threading.Lock()}
-_VALID_FLIGHT_TYPES = {"I", "N"}
+_FLIGHT_TYPE_NAMES = {"I": "international", "N": "national"}
+_VALID_FLIGHT_TYPES = set(_FLIGHT_TYPE_NAMES)
 _VALID_MONTHS = set(range(1, 13))
 
 
@@ -63,6 +70,46 @@ class Prediction(BaseModel):
     MES: int | None
     predicted_delay: int
 
+    @computed_field
+    @property
+    def flight_type(self) -> str | None:
+        """TIPOVUELO in words: international (I) or national (N)."""
+        return _FLIGHT_TYPE_NAMES.get(self.TIPOVUELO)
+
+    @computed_field
+    @property
+    def month_name(self) -> str | None:
+        """MES in words, e.g. 7 -> July."""
+        if self.MES not in _VALID_MONTHS:
+            return None
+        return calendar.month_name[self.MES]
+
+    @computed_field
+    @property
+    def prediction_label(self) -> Literal["delayed", "on_time"]:
+        """predicted_delay in words."""
+        return "delayed" if self.predicted_delay == 1 else "on_time"
+
+
+class PredictionsSummary(BaseModel):
+    """Delay counts over every prediction matching the request, not only the returned page."""
+
+    delayed: int
+    on_time: int
+    delay_rate: float | None = Field(description="delayed / total; null when nothing matched")
+    delay_threshold_minutes: int = Field(
+        default=DELAY_THRESHOLD_MINUTES,
+        description="A flight counts as delayed above this many minutes after schedule",
+    )
+
+
+class AppliedFilters(BaseModel):
+    """Filters as parsed from the query string (null = not filtered)."""
+
+    opera: list[str] | None
+    tipovuelo: list[str] | None
+    mes: list[int] | None
+
 
 class PredictResponse(BaseModel):
     """Result of a serving run: the first predictions of the refreshed table."""
@@ -72,6 +119,7 @@ class PredictResponse(BaseModel):
     pipeline_job_id: str
     model_version: str | None
     total_predictions: int
+    summary: PredictionsSummary | None = None
     predictions: list[Prediction]
 
 
@@ -82,6 +130,8 @@ class PredictionsPage(BaseModel):
     page_size: int
     total_predictions: int
     total_pages: int
+    filters: AppliedFilters
+    summary: PredictionsSummary | None = None
     predictions: list[Prediction]
 
 
@@ -232,5 +282,6 @@ def get_prediction_results(
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages(result["total_predictions"], page_size),
+        "filters": {"opera": opera_list, "tipovuelo": tipovuelo_list, "mes": mes_list},
         **result,
     }
