@@ -43,9 +43,10 @@ _PREDICTIONS_SQL = """
 WITH filtered AS (
   SELECT OPERA, TIPOVUELO, MES, prediction
   FROM `{table_id}`
-  WHERE (ARRAY_LENGTH(@opera) = 0 OR OPERA IN UNNEST(@opera))
-    AND (ARRAY_LENGTH(@tipovuelo) = 0 OR TIPOVUELO IN UNNEST(@tipovuelo))
-    AND (ARRAY_LENGTH(@mes) = 0 OR MES IN UNNEST(@mes))
+  -- BigQuery receives empty array parameters as NULL: IFNULL keeps "empty = no filter".
+  WHERE (IFNULL(ARRAY_LENGTH(@opera), 0) = 0 OR OPERA IN UNNEST(@opera))
+    AND (IFNULL(ARRAY_LENGTH(@tipovuelo), 0) = 0 OR TIPOVUELO IN UNNEST(@tipovuelo))
+    AND (IFNULL(ARRAY_LENGTH(@mes), 0) = 0 OR MES IN UNNEST(@mes))
 )
 SELECT
   (SELECT COUNT(*) FROM filtered) AS total,
@@ -54,7 +55,7 @@ SELECT
     FROM filtered
     ORDER BY OPERA, TIPOVUELO, MES, prediction
     LIMIT @limit OFFSET @offset
-  ) AS rows
+  ) AS page_rows  -- not "rows": ROWS is a reserved keyword in GoogleSQL
 """
 
 
@@ -360,7 +361,7 @@ def _fetch_predictions_bigquery(
     result = rows[0]
     return {
         "total_predictions": int(result["total"]),
-        "predictions": [_prediction_record(row) for row in result["rows"]],
+        "predictions": [_prediction_record(row) for row in result["page_rows"]],
     }
 
 
