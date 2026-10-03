@@ -40,13 +40,31 @@ SERVING_JOB="mle-serving-${ENV}"
 API_SERVICE="mle-api-${ENV}"
 LABELS="app=mle-challenge,env=${ENV},managed-by=bootstrap-sh"
 
-APIS="artifactregistry.googleapis.com bigquery.googleapis.com bigquerystorage.googleapis.com \
-cloudbuild.googleapis.com cloudresourcemanager.googleapis.com iam.googleapis.com \
-iamcredentials.googleapis.com logging.googleapis.com monitoring.googleapis.com run.googleapis.com \
-serviceusage.googleapis.com storage.googleapis.com sts.googleapis.com"
+APIS=(
+  artifactregistry.googleapis.com
+  bigquery.googleapis.com
+  bigquerystorage.googleapis.com
+  cloudbuild.googleapis.com
+  cloudresourcemanager.googleapis.com
+  iam.googleapis.com
+  iamcredentials.googleapis.com
+  logging.googleapis.com
+  monitoring.googleapis.com
+  run.googleapis.com
+  serviceusage.googleapis.com
+  storage.googleapis.com
+  sts.googleapis.com
+)
 
-SA_ROLES="roles/artifactregistry.writer roles/bigquery.dataOwner roles/bigquery.jobUser \
-roles/bigquery.resourceViewer roles/logging.logWriter roles/run.admin roles/storage.admin"
+SA_ROLES=(
+  roles/artifactregistry.writer
+  roles/bigquery.dataOwner
+  roles/bigquery.jobUser
+  roles/bigquery.resourceViewer
+  roles/logging.logWriter
+  roles/run.admin
+  roles/storage.admin
+)
 
 # --- Helpers ---------------------------------------------------------------------------------------
 
@@ -117,8 +135,8 @@ preflight() {
 
 foundation() {
   log "APIs"
-  gc services enable ${APIS}
-  ok "enabled: ${APIS//  / }"
+  gc services enable "${APIS[@]}"
+  ok "enabled: ${APIS[*]}"
 
   log "Service account ${SA_EMAIL}"
   if gc iam service-accounts describe "${SA_EMAIL}" >/dev/null 2>&1; then
@@ -132,7 +150,7 @@ foundation() {
 
   log "Project roles of the service account"
   local role member
-  for role in ${SA_ROLES}; do
+  for role in "${SA_ROLES[@]}"; do
     retry 6 gc projects add-iam-policy-binding "${PROJECT_ID}" --condition=None \
       --member="serviceAccount:${SA_EMAIL}" --role="${role}" >/dev/null
     ok "${role}"
@@ -256,11 +274,11 @@ data() {
   upload_if_changed serving_input.csv
 
   log "BigQuery dataset ${DATASET} (${REGION})"
-  local bq_labels="--label=app:mle-challenge --label=env:${ENV} --label=managed-by:bootstrap-sh"
+  local bq_labels=(--label=app:mle-challenge "--label=env:${ENV}" --label=managed-by:bootstrap-sh)
   if bqp show --dataset "${PROJECT_ID}:${DATASET}" >/dev/null 2>&1; then
     ok "dataset exists"
   else
-    bqp mk --dataset ${bq_labels} \
+    bqp mk --dataset "${bq_labels[@]}" \
       --description="Flight delay challenge (${ENV}): raw flights, serving input and predictions." \
       "${PROJECT_ID}:${DATASET}" >/dev/null
     ok "dataset created"
@@ -270,7 +288,7 @@ data() {
     if bqp show "${PROJECT_ID}:${DATASET}.${table}" >/dev/null 2>&1; then
       ok "table ${table} exists"
     else
-      bqp mk --table ${bq_labels} --schema="${REPO_ROOT}/infra/schemas/${table}.json" \
+      bqp mk --table "${bq_labels[@]}" --schema="${REPO_ROOT}/infra/schemas/${table}.json" \
         "${PROJECT_ID}:${DATASET}.${table}" >/dev/null
       ok "table ${table} created (infra/schemas/${table}.json)"
     fi
