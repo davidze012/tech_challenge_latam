@@ -10,12 +10,14 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
+from challenge.config import DELAY_THRESHOLD_MINUTES
 from challenge.connectors.local import LocalArtifactStore, LocalCSVClient
 from challenge.connectors.protocols import (
     IDENTIFIER_COLUMNS,
     ArtifactStore,
     DataReader,
     MetadataStore,
+    ServingSummaryStore,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,8 +35,6 @@ FEATURES_COLS: list[str] = [
     "OPERA_Copa Air",
 ]
 TARGET_COLUMN = "delay"
-#: A flight is delayed when it operates more than this many minutes after schedule.
-DELAY_THRESHOLD_MINUTES = 15
 
 #: Raw columns the features are derived from.
 CATEGORICAL_COLUMNS: tuple[str, ...] = IDENTIFIER_COLUMNS
@@ -217,6 +217,18 @@ class GCPModelMixin:
         if not isinstance(self._store, MetadataStore):
             return None
         return self._store.latest_run_id()
+
+    def load_run_metadata(self, run_id: str) -> dict[str, Any] | None:
+        """Return the metadata of a training run (``None`` if unknown or unsupported)."""
+        if not isinstance(self._store, MetadataStore):
+            return None
+        return self._store.load_metadata(run_id)
+
+    def save_serving_summary(self, summary: dict[str, Any]) -> str:
+        """Persist the summary of a serving run when the store supports it."""
+        if not isinstance(self._store, ServingSummaryStore):
+            raise TypeError(f"{type(self._store).__name__} does not support serving summaries")
+        return self._store.save_serving_summary(summary)
 
     @property
     def is_fitted(self) -> bool:

@@ -14,6 +14,7 @@ from challenge.connectors.local import LocalArtifactStore, LocalCSVClient
 from challenge.connectors.protocols import (
     MetadataStore,
     build_predictions_frame,
+    combination_key,
     validate_run_id,
 )
 from challenge.model import DelayModel
@@ -199,3 +200,37 @@ def test_bigquery_client_is_created_lazily():
         assert reader.client is client_cls.return_value
         assert reader.client is client_cls.return_value
     client_cls.assert_called_once()
+
+
+# --- Serving summary (model lineage + probabilities) ------------------------------------------
+
+
+def test_local_store_serving_summary_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))
+    store = LocalArtifactStore()
+    assert store.load_serving_summary() is None
+    path = store.save_serving_summary({"model_version": "run-1", "scores": {"a|I|7": 0.6}})
+    assert path == str(tmp_path / "serving" / "latest.json")
+    assert store.load_serving_summary()["scores"] == {"a|I|7": 0.6}
+
+
+@patch("challenge.connectors.gcs.GCSArtifactStore._bucket_name", return_value="b")
+def test_gcs_store_serving_summary_roundtrip(_):
+    storage_patch, bucket = _patched_bucket()
+    blob = bucket.blob.return_value
+    with storage_patch:
+        store = GCSArtifactStore()
+        assert (
+            store.save_serving_summary({"model_version": "run-1"}) == "gs://b/serving/latest.json"
+        )
+        bucket.blob.assert_called_with("serving/latest.json")
+        blob.download_as_text.return_value = json.dumps({"model_version": "run-1"})
+        assert store.load_serving_summary() == {"model_version": "run-1"}
+        blob.download_as_text.side_effect = NotFound("not yet")
+        assert store.load_serving_summary() is None
+
+
+def test_combination_key_is_stable_across_dtypes():
+    assert combination_key("Grupo LATAM", "I", 7) == "Grupo LATAM|I|7"
+    assert combination_key("Grupo LATAM", "I", 7.0) == "Grupo LATAM|I|7"
+    assert combination_key("Grupo LATAM", "I", pd.NA) == "Grupo LATAM|I|"

@@ -17,6 +17,7 @@ from challenge.connectors.protocols import (
     LATEST_POINTER,
     METADATA_FILENAME,
     MODEL_FILENAME,
+    SERVING_SUMMARY,
     build_predictions_frame,
     validate_run_id,
 )
@@ -143,6 +144,20 @@ class LocalArtifactStore:
     def load_metadata(self, run_id: str) -> dict[str, Any] | None:
         """Return the metadata of ``run_id``, or ``None`` if it does not exist."""
         path = self._root() / validate_run_id(run_id) / METADATA_FILENAME
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text())
+
+    def save_serving_summary(self, summary: dict[str, Any]) -> str:
+        """Write ``<ARTIFACTS_DIR>/serving/latest.json`` (overwritten by every serving run)."""
+        path = self._root() / SERVING_SUMMARY
+        payload = json.dumps(summary, indent=2, default=str)
+        _atomic_write(path, lambda tmp: tmp.write_text(payload))
+        return str(path)
+
+    def load_serving_summary(self) -> dict[str, Any] | None:
+        """Return the last serving summary, or ``None`` if serving has not run yet."""
+        path = self._root() / SERVING_SUMMARY
         if not path.is_file():
             return None
         return json.loads(path.read_text())

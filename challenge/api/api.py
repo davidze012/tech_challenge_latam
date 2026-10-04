@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,7 +20,10 @@ from challenge.api.utils import (
     _query_predictions,
     _read_model_metadata,
     _submit_and_wait,
+    enrich_predictions,
     invalidate_predictions_cache,
+    model_lineage,
+    summarize,
     total_pages,
     warm_up,
 )
@@ -56,12 +60,58 @@ class TrainResponse(BaseModel):
 
 
 class Prediction(BaseModel):
-    """A flight and its predicted delay (1 = delayed more than DELAY_THRESHOLD_MINUTES)."""
+    """A flight, its predicted delay (1 = delayed more than 15 minutes) and readable context."""
 
     OPERA: str
     TIPOVUELO: str
     MES: int | None
     predicted_delay: int
+    predicted_label: Literal["delayed", "on_time"]
+    flight_type: str | None = Field(None, examples=["International"])
+    month_name: str | None = Field(None, examples=["July"])
+    delay_probability: float | None = Field(
+        None, description="Probability of delay estimated by the model that made the prediction"
+    )
+    historical_flights: int | None = Field(
+        None, description="Flights with this airline, flight type and month in the 2017 data"
+    )
+    historical_delay_rate: float | None = Field(
+        None, description="Share of those historical flights that were delayed (> 15 min)"
+    )
+
+
+class Summary(BaseModel):
+    """Delayed / on-time counts over the whole filtered set (not just the page)."""
+
+    delayed: int
+    on_time: int
+    delay_rate: float | None
+
+
+class ModelLineage(BaseModel):
+    """Model that produced the current predictions."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_version: str | None
+    trained_at: str | None
+    predicted_at: str | None
+    metrics: dict[str, float | int] = {}
+
+
+class Filters(BaseModel):
+    """Filters applied to the page (``null`` = not filtered)."""
+
+    opera: list[str] | None
+    tipovuelo: list[str] | None
+    mes: list[int] | None
+
+
+class Links(BaseModel):
+    """Relative links to the neighbouring pages (``null`` when there is none)."""
+
+    next: str | None
+    prev: str | None
 
 
 class PredictResponse(BaseModel):
@@ -72,6 +122,8 @@ class PredictResponse(BaseModel):
     pipeline_job_id: str
     model_version: str | None
     total_predictions: int
+    summary: Summary | None = None
+    model: ModelLineage | None = None
     predictions: list[Prediction]
 
 
@@ -82,6 +134,10 @@ class PredictionsPage(BaseModel):
     page_size: int
     total_predictions: int
     total_pages: int
+    filters: Filters
+    summary: Summary | None = None
+    model: ModelLineage | None = None
+    links: Links
     predictions: list[Prediction]
 
 
@@ -202,10 +258,14 @@ def post_pipeline_predict() -> dict:
         job = _run_pipeline("predict")
 
     invalidate_predictions_cache()
+    result = _query_predictions(1, 10, None, None, None)
     return {
         "pipeline_job_id": job.name,
         "model_version": _latest_model_version(),
-        **_query_predictions(1, 10, None, None, None),
+        "total_predictions": result["total_predictions"],
+        "summary": summarize(result),
+        "model": model_lineage(),
+        "predictions": enrich_predictions(result["predictions"]),
     }
 
 
@@ -228,9 +288,32 @@ def get_prediction_results(
 
     mes_list = _parse_months(mes)
     result = _query_predictions(page, page_size, opera_list, tipovuelo_list, mes_list)
+    pages = total_pages(result["total_predictions"], page_size)
+    filters = {"opera": opera_list, "tipovuelo": tipovuelo_list, "mes": mes_list}
     return {
         "page": page,
         "page_size": page_size,
-        "total_pages": total_pages(result["total_predictions"], page_size),
-        **result,
+        "total_predictions": result["total_predictions"],
+        "total_pages": pages,
+        "filters": filters,
+        "summary": summarize(result),
+        "model": model_lineage(),
+        "links": _page_links(page, page_size, pages, filters),
+        "predictions": enrich_predictions(result["predictions"]),
+    }
+
+
+def _page_links(
+    page: int, page_size: int, pages: int, filters: dict[str, list[Any] | None]
+) -> dict[str, str | None]:
+    """Relative URLs of the next/previous pages, preserving page_size and the filters."""
+    query = {name: ",".join(map(str, values)) for name, values in filters.items() if values}
+
+    def link(target: int) -> str:
+        params = {"page": target, "page_size": page_size, **query}
+        return f"/pipeline/predict/results?{urlencode(params)}"
+
+    return {
+        "next": link(page + 1) if page < pages else None,
+        "prev": link(min(page - 1, pages)) if page > 1 and pages > 0 else None,
     }

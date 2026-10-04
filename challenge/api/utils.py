@@ -23,11 +23,11 @@ import pandas as pd
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery, run_v2
 
-from challenge.config import get_settings
+from challenge.config import DELAY_THRESHOLD_MINUTES, get_settings
 from challenge.connectors import gcs
 from challenge.connectors.bigquery import BigQueryClient
 from challenge.connectors.local import PREDICTIONS_FILENAME, LocalArtifactStore
-from challenge.connectors.protocols import PREDICTION_COLUMN
+from challenge.connectors.protocols import IDENTIFIER_COLUMNS, PREDICTION_COLUMN, combination_key
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +47,28 @@ WITH filtered AS (
   WHERE (IFNULL(ARRAY_LENGTH(@opera), 0) = 0 OR OPERA IN UNNEST(@opera))
     AND (IFNULL(ARRAY_LENGTH(@tipovuelo), 0) = 0 OR TIPOVUELO IN UNNEST(@tipovuelo))
     AND (IFNULL(ARRAY_LENGTH(@mes), 0) = 0 OR MES IN UNNEST(@mes))
+),
+-- Historical context: how often each (airline, flight type, month) was delayed in raw_flights.
+history AS (
+  SELECT
+    OPERA, TIPOVUELO, MES,
+    COUNT(*) AS historical_flights,
+    ROUND(AVG(IF(DATETIME_DIFF(`Fecha-O`, `Fecha-I`, MINUTE) > @delay_threshold, 1, 0)), 4)
+      AS historical_delay_rate
+  FROM `{raw_table_id}`
+  GROUP BY OPERA, TIPOVUELO, MES
 )
 SELECT
   (SELECT COUNT(*) FROM filtered) AS total,
+  (SELECT COUNTIF(prediction = 1) FROM filtered) AS delayed,
   ARRAY(
-    SELECT AS STRUCT OPERA, TIPOVUELO, MES, prediction AS predicted_delay
-    FROM filtered
-    ORDER BY OPERA, TIPOVUELO, MES, prediction
+    SELECT AS STRUCT
+      f.OPERA, f.TIPOVUELO, f.MES, f.prediction AS predicted_delay,
+      h.historical_flights, h.historical_delay_rate
+    FROM filtered AS f
+    LEFT JOIN history AS h
+      ON f.OPERA = h.OPERA AND f.TIPOVUELO = h.TIPOVUELO AND f.MES = h.MES
+    ORDER BY f.OPERA, f.TIPOVUELO, f.MES, f.prediction
     LIMIT @limit OFFSET @offset
   ) AS page_rows  -- not "rows": ROWS is a reserved keyword in GoogleSQL
 """
@@ -143,9 +158,15 @@ def _results_cache() -> TTLCache:
     return TTLCache(ttl_seconds=get_settings().results_cache_ttl_s)
 
 
+@cache
+def _summary_cache() -> TTLCache:
+    return TTLCache(ttl_seconds=get_settings().results_cache_ttl_s)
+
+
 def invalidate_predictions_cache() -> None:
-    """Forget cached prediction pages so the next read sees the latest serving output."""
+    """Forget cached pages and the serving summary so reads see the latest serving output."""
     _results_cache().invalidate()
+    _summary_cache().invalidate()
 
 
 # --- Clients (GCP mode) ------------------------------------------------------------------------
@@ -339,7 +360,9 @@ def _fetch_predictions_bigquery(
     tipovuelo: tuple[str, ...],
     mes: tuple[int, ...],
 ) -> dict[str, Any]:
-    table_id = BigQueryClient.table_id(get_settings().bq_predictions_table)
+    settings = get_settings()
+    table_id = BigQueryClient.table_id(settings.bq_predictions_table)
+    raw_table_id = BigQueryClient.table_id(settings.bq_raw_table)
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter("opera", "STRING", list(opera)),
@@ -347,20 +370,23 @@ def _fetch_predictions_bigquery(
             bigquery.ArrayQueryParameter("mes", "INT64", list(mes)),
             bigquery.ScalarQueryParameter("limit", "INT64", page_size),
             bigquery.ScalarQueryParameter("offset", "INT64", (page - 1) * page_size),
+            bigquery.ScalarQueryParameter("delay_threshold", "INT64", DELAY_THRESHOLD_MINUTES),
         ],
         maximum_bytes_billed=_MAX_BYTES_BILLED,
     )
     try:
         rows = list(
             _bigquery_client().query_and_wait(
-                _PREDICTIONS_SQL.format(table_id=table_id), job_config=job_config
+                _PREDICTIONS_SQL.format(table_id=table_id, raw_table_id=raw_table_id),
+                job_config=job_config,
             )
         )
     except NotFound:  # serving has not run yet
-        return {"total_predictions": 0, "predictions": []}
+        return {"total_predictions": 0, "delayed": 0, "predictions": []}
     result = rows[0]
     return {
         "total_predictions": int(result["total"]),
+        "delayed": int(result["delayed"] or 0),
         "predictions": [_prediction_record(row) for row in result["page_rows"]],
     }
 
@@ -374,7 +400,7 @@ def _fetch_predictions_local(
 ) -> dict[str, Any]:
     path = Path(get_settings().artifacts_dir) / PREDICTIONS_FILENAME
     if not path.is_file():
-        return {"total_predictions": 0, "predictions": []}
+        return {"total_predictions": 0, "delayed": 0, "predictions": []}
     frame = pd.read_csv(path, dtype={"OPERA": "string", "TIPOVUELO": "string", "MES": "Int64"})
     if opera:
         frame = frame[frame["OPERA"].isin(opera)]
@@ -387,20 +413,132 @@ def _fetch_predictions_local(
     page_rows = frame.iloc[start : start + page_size].rename(
         columns={PREDICTION_COLUMN: "predicted_delay"}
     )
+    history = _historical_stats_local()
+    records = []
+    for row in page_rows.to_dict("records"):
+        flights, rate = history.get(
+            combination_key(row["OPERA"], row["TIPOVUELO"], row["MES"]), (None, None)
+        )
+        records.append(
+            _prediction_record(
+                {**row, "historical_flights": flights, "historical_delay_rate": rate}
+            )
+        )
     return {
         "total_predictions": len(frame),
-        "predictions": [_prediction_record(row) for row in page_rows.to_dict("records")],
+        "delayed": int(frame[PREDICTION_COLUMN].sum()),
+        "predictions": records,
+    }
+
+
+def _historical_stats_local() -> dict[str, tuple[int, float]]:
+    """Local equivalent of the ``history`` CTE, computed from ``DATA_DIR/data.csv``."""
+    path = Path(get_settings().data_dir) / _RAW_TRAINING_FILENAME
+    if not path.is_file():
+        return {}
+    return _historical_stats_from(str(path), path.stat().st_mtime)
+
+
+@cache
+def _historical_stats_from(path: str, _mtime: float) -> dict[str, tuple[int, float]]:
+    # Cached per (file, modification time): recomputed only when data.csv changes.
+    raw = pd.read_csv(path, usecols=["Fecha-I", "Fecha-O", *IDENTIFIER_COLUMNS], low_memory=False)
+    minutes = (
+        pd.to_datetime(raw["Fecha-O"]) - pd.to_datetime(raw["Fecha-I"])
+    ).dt.total_seconds() / 60
+    raw["delayed"] = (minutes > DELAY_THRESHOLD_MINUTES).astype(int)
+    stats = raw.groupby(list(IDENTIFIER_COLUMNS))["delayed"].agg(["count", "mean"])
+    return {
+        combination_key(*key): (int(row["count"]), round(float(row["mean"]), 4))
+        for key, row in stats.iterrows()
     }
 
 
 def _prediction_record(row: Any) -> dict[str, Any]:
-    """Plain record ready for JSON serialisation."""
+    """Plain record (no numpy/pandas scalars) ready for JSON serialisation."""
     month = row["MES"]
+    flights, rate = row.get("historical_flights"), row.get("historical_delay_rate")
     return {
         "OPERA": str(row["OPERA"]),
         "TIPOVUELO": str(row["TIPOVUELO"]),
         "MES": None if month is None or pd.isna(month) else int(month),
         "predicted_delay": int(row["predicted_delay"]),
+        "historical_flights": None if flights is None or pd.isna(flights) else int(flights),
+        "historical_delay_rate": None if rate is None or pd.isna(rate) else float(rate),
+    }
+
+
+# --- Response enrichment -------------------------------------------------------------------------
+
+_FLIGHT_TYPES = {"I": "International", "N": "National"}
+_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)  # fmt: skip
+
+
+def _serving_summary() -> dict[str, Any] | None:
+    """Summary of the last serving run (model lineage + probabilities), cached; never raises."""
+
+    def load() -> dict[str, Any] | None:
+        try:
+            store = _artifact_store()
+            return store.load_serving_summary()
+        except Exception:
+            logger.warning("Could not read the serving summary", exc_info=True)
+            return None
+
+    return _summary_cache().get_or_compute("serving-summary", load)
+
+
+def _month_name(month: Any) -> str | None:
+    return _MONTHS[month - 1] if isinstance(month, int) and 1 <= month <= len(_MONTHS) else None
+
+
+def enrich_predictions(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add readable labels and the delay probability of the last serving run to each record."""
+    summary = _serving_summary() or {}
+    scores = summary.get("scores") or {}
+    enriched = []
+    for record in records:
+        month = record.get("MES")
+        key = combination_key(record["OPERA"], record["TIPOVUELO"], month)
+        enriched.append(
+            {
+                **record,
+                "predicted_label": "delayed" if record["predicted_delay"] == 1 else "on_time",
+                "flight_type": _FLIGHT_TYPES.get(record["TIPOVUELO"]),
+                "month_name": _month_name(month),
+                "delay_probability": scores.get(key),
+                "historical_flights": record.get("historical_flights"),
+                "historical_delay_rate": record.get("historical_delay_rate"),
+            }
+        )
+    return enriched
+
+
+def summarize(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Delayed / on-time counts of the whole filtered set (``None`` if unknown)."""
+    if "delayed" not in result:
+        return None
+    total, delayed = result["total_predictions"], result["delayed"]
+    return {
+        "delayed": delayed,
+        "on_time": total - delayed,
+        "delay_rate": round(delayed / total, 4) if total else None,
+    }
+
+
+def model_lineage() -> dict[str, Any] | None:
+    """Model that produced the current predictions: version, dates and holdout metrics."""
+    summary = _serving_summary()
+    if not summary:
+        return None
+    return {
+        "model_version": summary.get("model_version"),
+        "trained_at": summary.get("trained_at"),
+        "predicted_at": summary.get("predicted_at"),
+        "metrics": summary.get("metrics") or {},
     }
 
 
