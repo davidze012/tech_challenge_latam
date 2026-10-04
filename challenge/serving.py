@@ -7,14 +7,16 @@ predict → write the predictions (BigQuery in GCP, ``predictions.csv`` locally)
 import logging
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from challenge.config import Settings, configure_logging, get_settings
 from challenge.connectors import gcs
 from challenge.connectors.local import PREDICTIONS_FILENAME, LocalArtifactStore, LocalCSVClient
-from challenge.connectors.protocols import IDENTIFIER_COLUMNS
+from challenge.connectors.protocols import IDENTIFIER_COLUMNS, combination_key
 from challenge.model import DelayModel
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,52 @@ def step_write(model: DelayModel, predictions: list[int], data: pd.DataFrame) ->
     model.write_predictions(predictions, data.loc[:, list(IDENTIFIER_COLUMNS)])
 
 
+#: Metrics copied from the training metadata into the serving summary (what the API shows).
+SUMMARY_METRICS = ("recall_1", "precision_1", "f1_1", "recall_0", "roc_auc", "accuracy")
+
+
+def step_publish_summary(
+    model: DelayModel,
+    model_version: str | None,
+    data: pd.DataFrame,
+    features: pd.DataFrame,
+    predictions: list[int],
+) -> dict[str, Any] | None:
+    """Publish ``serving/latest.json``: model lineage, run stats and delay probabilities.
+
+    The predictions table keeps its 4-column contract; this summary lets the API add the
+    probability and the model lineage to each prediction. Best effort: a failure here is logged
+    but never fails the job, because the predictions themselves are already written.
+    """
+    if not model.is_fitted:
+        return None
+    try:
+        metadata = (model.load_run_metadata(model_version) if model_version else None) or {}
+        probabilities = model.predict_proba(features)
+        identifiers = data.loc[:, list(IDENTIFIER_COLUMNS)].itertuples(index=False)
+        summary = {
+            "model_version": model_version,
+            "trained_at": metadata.get("trained_at"),
+            "metrics": {
+                k: v for k, v in metadata.get("metrics", {}).items() if k in SUMMARY_METRICS
+            },
+            "predicted_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "rows": len(predictions),
+            "delayed": int(sum(predictions)),
+            # Same inputs → same probability, so one score per combination is exact.
+            "scores": {
+                combination_key(*row): round(float(probability), 4)
+                for row, probability in zip(identifiers, probabilities, strict=True)
+            },
+        }
+        location = model.save_serving_summary(summary)
+        logger.info("Published serving summary %s (%d scores)", location, len(summary["scores"]))
+        return summary
+    except Exception:
+        logger.warning("Could not publish the serving summary", exc_info=True)
+        return None
+
+
 # --- helpers ----------------------------------------------------------------------------------
 
 
@@ -104,6 +152,7 @@ def main() -> str:
     step_write(model, predictions, data)
 
     destination = describe_destination(settings)
+    step_publish_summary(model, model_version, data, features, predictions)
     logger.info(
         "Serving finished: %d predictions written to %s (model=%s)",
         len(predictions),

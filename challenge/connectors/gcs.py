@@ -18,6 +18,7 @@ from challenge.connectors.protocols import (
     LATEST_POINTER,
     METADATA_FILENAME,
     MODEL_FILENAME,
+    SERVING_SUMMARY,
     validate_run_id,
 )
 
@@ -119,6 +120,20 @@ class GCSArtifactStore:
         blob_name = f"{validate_run_id(run_id)}/{METADATA_FILENAME}"
         try:
             return json.loads(self._bucket().blob(blob_name).download_as_text())
+        except NotFound:
+            return None
+
+    def save_serving_summary(self, summary: dict[str, Any]) -> str:
+        """Upload ``serving/latest.json`` (overwritten by every serving run) and return its URI."""
+        self._bucket().blob(SERVING_SUMMARY).upload_from_string(
+            json.dumps(summary, indent=2, default=str), content_type="application/json"
+        )
+        return f"gs://{self._bucket_name()}/{SERVING_SUMMARY}"
+
+    def load_serving_summary(self) -> dict[str, Any] | None:
+        """Return the last serving summary, or ``None`` if serving has not run yet."""
+        try:
+            return json.loads(self._bucket().blob(SERVING_SUMMARY).download_as_text())
         except NotFound:
             return None
 
