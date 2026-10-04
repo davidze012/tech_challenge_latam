@@ -112,18 +112,24 @@ def test_local_query_filters_sorts_and_paginates(local_artifacts):
 
     result = utils._query_predictions(1, 2, ["Grupo LATAM"], None, [7, 12])
     assert result["total_predictions"] == 3
+    assert result["delayed"] == 2
+    no_history = {"historical_flights": None, "historical_delay_rate": None}
     assert result["predictions"] == [
-        {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1},
-        {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 12, "predicted_delay": 0},
+        {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1, **no_history},
+        {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 12, "predicted_delay": 0, **no_history},
     ]
     page_2 = utils._query_predictions(2, 2, ["Grupo LATAM"], None, [7, 12])
     assert [p["TIPOVUELO"] for p in page_2["predictions"]] == ["N"]
     beyond = utils._query_predictions(9, 2, ["Grupo LATAM"], None, None)
-    assert beyond == {"total_predictions": 3, "predictions": []}
+    assert beyond == {"total_predictions": 3, "delayed": 2, "predictions": []}
 
 
 def test_local_query_without_predictions_file_is_empty(local_artifacts):
-    assert utils._query_predictions(1, 10) == {"total_predictions": 0, "predictions": []}
+    assert utils._query_predictions(1, 10) == {
+        "total_predictions": 0,
+        "delayed": 0,
+        "predictions": [],
+    }
 
 
 def test_cache_key_ignores_filter_order_and_duplicates(local_artifacts):
@@ -212,8 +218,16 @@ def test_gcp_query_is_parameterised(gcp_mode):
     client.query_and_wait.return_value = [
         {
             "total": 42,
+            "delayed": 30,
             "page_rows": [
-                {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1}
+                {
+                    "OPERA": "Grupo LATAM",
+                    "TIPOVUELO": "I",
+                    "MES": 7,
+                    "predicted_delay": 1,
+                    "historical_flights": 412,
+                    "historical_delay_rate": 0.3107,
+                }
             ],
         }
     ]
@@ -221,9 +235,12 @@ def test_gcp_query_is_parameterised(gcp_mode):
         result = utils._query_predictions(3, 20, ["Grupo LATAM"], ["I"], [7])
 
     assert result["total_predictions"] == 42
+    assert result["delayed"] == 30
     assert result["predictions"][0]["predicted_delay"] == 1
+    assert result["predictions"][0]["historical_flights"] == 412
     sql = client.query_and_wait.call_args.args[0]
     assert "`proj.ds.predictions`" in sql
+    assert "`proj.ds.raw_flights`" in sql  # historical context joins the raw table
     assert "Grupo LATAM" not in sql
     params = {
         p.name: p for p in client.query_and_wait.call_args.kwargs["job_config"].query_parameters
@@ -231,13 +248,18 @@ def test_gcp_query_is_parameterised(gcp_mode):
     assert params["opera"].values == ["Grupo LATAM"]
     assert params["mes"].values == [7]
     assert (params["limit"].value, params["offset"].value) == (20, 40)
+    assert params["delay_threshold"].value == 15
 
 
 def test_gcp_query_on_missing_table_is_empty(gcp_mode):
     client = MagicMock()
     client.query_and_wait.side_effect = NotFound("no table")
     with patch.object(utils, "_bigquery_client", return_value=client):
-        assert utils._query_predictions(1, 10) == {"total_predictions": 0, "predictions": []}
+        assert utils._query_predictions(1, 10) == {
+            "total_predictions": 0,
+            "delayed": 0,
+            "predictions": [],
+        }
 
 
 def test_gcp_raw_flights_uses_table_metadata(gcp_mode):
@@ -364,3 +386,118 @@ def test_results_normalises_filters_and_reports_total_pages():
     assert response.status_code == 200
     assert response.json()["total_pages"] == 3
     query.assert_called_once_with(1, 10, ["Copa Air"], ["I", "N"], [7])
+
+
+# --- Richer responses: history, labels, probabilities, lineage, links -----------------------------
+
+
+def test_local_history_is_computed_from_raw_flights(local_artifacts, tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pd.DataFrame(
+        {
+            "Fecha-I": ["2017-07-01 10:00:00"] * 4,
+            "Fecha-O": [
+                "2017-07-01 10:30:00",
+                "2017-07-01 10:05:00",
+                "2017-07-01 10:16:00",
+                "2017-07-01 10:15:00",
+            ],
+            "OPERA": ["Grupo LATAM"] * 4,
+            "TIPOVUELO": ["I"] * 4,
+            "MES": [7] * 4,
+        }
+    ).to_csv(data_dir / "data.csv", index=False)
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    clear_settings_cache()
+    PREDICTIONS.to_csv(local_artifacts / "predictions.csv", index=False)
+
+    row = utils._query_predictions(1, 10, ["Grupo LATAM"], ["I"], [7])["predictions"][0]
+
+    assert row["historical_flights"] == 4
+    assert row["historical_delay_rate"] == 0.5  # 30 and 16 min late; 5 and 15 are on time
+
+
+def test_enrich_predictions_adds_labels_and_probabilities():
+    summary = {"scores": {"Grupo LATAM|I|7": 0.6123}}
+    records = [
+        {"OPERA": "Grupo LATAM", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1},
+        {"OPERA": "Sky Airline", "TIPOVUELO": "N", "MES": 13, "predicted_delay": 0},
+    ]
+    with patch.object(utils, "_serving_summary", return_value=summary):
+        delayed, on_time = utils.enrich_predictions(records)
+
+    assert delayed["predicted_label"] == "delayed"
+    assert delayed["flight_type"] == "International"
+    assert delayed["month_name"] == "July"
+    assert delayed["delay_probability"] == 0.6123
+    assert on_time["predicted_label"] == "on_time"
+    assert on_time["flight_type"] == "National"
+    assert on_time["month_name"] is None  # out-of-range month is not invented
+    assert on_time["delay_probability"] is None  # unknown combination
+
+
+def test_summarize_counts_the_whole_filtered_set():
+    assert utils.summarize({"total_predictions": 100, "delayed": 52}) == {
+        "delayed": 52,
+        "on_time": 48,
+        "delay_rate": 0.52,
+    }
+    assert utils.summarize({"total_predictions": 0, "delayed": 0})["delay_rate"] is None
+    assert utils.summarize({"total_predictions": 5, "predictions": []}) is None
+
+
+def test_model_lineage_comes_from_the_serving_summary():
+    summary = {
+        "model_version": "run-1",
+        "trained_at": "2026-10-03T20:14:40+00:00",
+        "predicted_at": "2026-10-03T20:17:05+00:00",
+        "metrics": {"recall_1": 0.6882},
+        "scores": {"x": 1},
+    }
+    with patch.object(utils, "_serving_summary", return_value=summary):
+        assert utils.model_lineage() == {
+            "model_version": "run-1",
+            "trained_at": "2026-10-03T20:14:40+00:00",
+            "predicted_at": "2026-10-03T20:17:05+00:00",
+            "metrics": {"recall_1": 0.6882},
+        }
+    with patch.object(utils, "_serving_summary", return_value=None):
+        assert utils.model_lineage() is None
+
+
+def test_serving_summary_read_failure_degrades_to_none(gcp_mode):
+    with patch.object(utils, "_artifact_store", side_effect=RuntimeError("gcs down")):
+        assert utils._serving_summary() is None
+
+
+def test_results_response_has_filters_summary_and_links():
+    page = {
+        "total_predictions": 23,
+        "delayed": 10,
+        "predictions": [{"OPERA": "Copa Air", "TIPOVUELO": "I", "MES": 7, "predicted_delay": 1}],
+    }
+    with (
+        patch.object(api_module, "_query_predictions", return_value=page),
+        patch.object(api_module, "model_lineage", return_value=None),
+    ):
+        body = client.get(
+            "/pipeline/predict/results?page=2&page_size=10&mes=7&opera=Copa%20Air"
+        ).json()
+
+    assert body["filters"] == {"opera": ["Copa Air"], "tipovuelo": None, "mes": [7]}
+    assert body["summary"] == {"delayed": 10, "on_time": 13, "delay_rate": 0.4348}
+    assert body["links"] == {
+        "next": "/pipeline/predict/results?page=3&page_size=10&opera=Copa+Air&mes=7",
+        "prev": "/pipeline/predict/results?page=1&page_size=10&opera=Copa+Air&mes=7",
+    }
+    assert body["predictions"][0]["predicted_label"] == "delayed"
+
+
+def test_links_at_the_edges():
+    page = {"total_predictions": 5, "delayed": 1, "predictions": []}
+    with patch.object(api_module, "_query_predictions", return_value=page):
+        first = client.get("/pipeline/predict/results?page=1&page_size=10").json()["links"]
+        beyond = client.get("/pipeline/predict/results?page=7&page_size=10").json()["links"]
+    assert first == {"next": None, "prev": None}
+    assert beyond == {"next": None, "prev": "/pipeline/predict/results?page=1&page_size=10"}
