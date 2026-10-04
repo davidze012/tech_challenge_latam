@@ -17,6 +17,8 @@ PREDICTION_COLUMN = "prediction"
 MODEL_FILENAME = "model.joblib"
 METADATA_FILENAME = "metadata.json"
 LATEST_POINTER = "latest.txt"
+#: Summary of the last serving run (model lineage + delay probabilities), at the store root.
+SERVING_SUMMARY = "serving/latest.json"
 
 # run_ids become path segments
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -29,6 +31,16 @@ def validate_run_id(run_id: str) -> str:
             f"Invalid run_id {run_id!r}: use 1-128 chars of letters, digits, '.', '_' or '-'"
         )
     return run_id
+
+
+def combination_key(opera: Any, tipovuelo: Any, mes: Any) -> str:
+    """Key of an (OPERA, TIPOVUELO, MES) combination, e.g. ``"Grupo LATAM|I|7"``.
+
+    The model only uses these three inputs, so a prediction (and its probability) is a pure
+    function of this key.
+    """
+    month = "" if mes is None or pd.isna(mes) else int(mes)
+    return f"{opera}|{tipovuelo}|{month}"
 
 
 def build_predictions_frame(predictions: list[int], identifiers: pd.DataFrame) -> pd.DataFrame:
@@ -94,4 +106,17 @@ class MetadataStore(Protocol):
 
     def latest_run_id(self) -> str | None:
         """Return the run_id stored in the latest pointer, or ``None`` if there is none."""
+        ...
+
+
+@runtime_checkable
+class ServingSummaryStore(Protocol):
+    """Optional extension of an ArtifactStore: summary of the last serving run."""
+
+    def save_serving_summary(self, summary: dict[str, Any]) -> str:
+        """Persist the summary of the last serving run and return its path."""
+        ...
+
+    def load_serving_summary(self) -> dict[str, Any] | None:
+        """Return the summary of the last serving run, or ``None`` if there is none."""
         ...

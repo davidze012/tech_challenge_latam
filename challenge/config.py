@@ -10,6 +10,8 @@ from functools import lru_cache
 VALID_DEPLOYMENT_MODES = ("local", "gcp")
 #: Public name of the served model (returned by the API and stored in the run metadata).
 MODEL_DISPLAY_NAME = "delay-classifier"
+#: A flight is delayed when it operates more than this many minutes after schedule.
+DELAY_THRESHOLD_MINUTES = 15
 
 # Settings fields that must be non-empty in GCP mode, mapped to the env var that feeds them.
 _REQUIRED_GCP_SETTINGS = {

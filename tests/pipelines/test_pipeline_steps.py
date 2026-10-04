@@ -146,3 +146,26 @@ def _local_settings() -> dict:
         "bq_raw_table": "raw_flights",
         "bq_predictions_table": "predictions",
     }
+
+
+def test_serving_publishes_lineage_and_probabilities(local_env):
+    training.main(run_id="run-summary")
+    serving.main()
+
+    summary = json.loads((local_env / "serving" / "latest.json").read_text())
+    assert summary["model_version"] == "run-summary"
+    assert summary["metrics"]["recall_1"] >= training.MIN_RECALL_DELAY
+    assert summary["rows"] == 100
+    assert 0 <= summary["delayed"] <= 100
+    assert len(summary["scores"]) > 0
+    assert all(0.0 <= p <= 1.0 for p in summary["scores"].values())
+
+
+def test_summary_failure_never_fails_serving(local_env, monkeypatch):
+    training.main(run_id="run-ok")
+
+    def broken(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(LocalArtifactStore, "save_serving_summary", broken)
+    assert serving.main().endswith("predictions.csv")  # predictions are still written
