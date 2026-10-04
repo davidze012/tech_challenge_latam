@@ -1,5 +1,7 @@
 # MLE Challenge — Flight Delay Prediction on GCP
 
+> **Solution:** documentation in [`docs/challenge.md`](docs/challenge.md) · live API: https://mle-api-prod-wr36ajzmgq-uc.a.run.app ([interactive docs](https://mle-api-prod-wr36ajzmgq-uc.a.run.app/docs))
+
 ## Context
 
 A Data Scientist at LATAM explored flight delay prediction for Santiago (SCL) airport in `challenge/exploration.ipynb`. The notebook works well as an experiment, but it's not production-ready.
