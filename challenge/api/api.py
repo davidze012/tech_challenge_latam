@@ -9,7 +9,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from challenge.api.utils import (
@@ -35,6 +36,8 @@ logger = logging.getLogger(__name__)
 _PIPELINE_LOCKS = {"train": threading.Lock(), "predict": threading.Lock()}
 _VALID_FLIGHT_TYPES = {"I", "N"}
 _VALID_MONTHS = set(range(1, 13))
+#: Keeps the query OFFSET ((page - 1) * page_size) far below BigQuery's INT64 limit.
+_MAX_PAGE = 100_000
 
 
 # --- Schemas -----------------------------------------------------------------------------------
@@ -162,9 +165,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Flight Delay Pipelines API",
     summary="Control plane for the SCL flight-delay training and batch-serving pipelines.",
-    version="1.0.0",
+    version="1.0.2",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    """Answer unexpected errors with JSON; the server still logs the traceback."""
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 @contextmanager
@@ -259,19 +268,21 @@ def post_pipeline_predict() -> dict:
 
     invalidate_predictions_cache()
     result = _query_predictions(1, 10, None, None, None)
+    lineage = model_lineage()
     return {
         "pipeline_job_id": job.name,
-        "model_version": _latest_model_version(),
+        # The model that made these predictions, even if a newer one was trained meanwhile.
+        "model_version": (lineage or {}).get("model_version") or _latest_model_version(),
         "total_predictions": result["total_predictions"],
         "summary": summarize(result),
-        "model": model_lineage(),
+        "model": lineage,
         "predictions": enrich_predictions(result["predictions"]),
     }
 
 
 @app.get("/pipeline/predict/results", status_code=200, response_model=PredictionsPage)
 def get_prediction_results(
-    page: int = Query(1, ge=1, description="1-based page number"),
+    page: int = Query(1, ge=1, le=_MAX_PAGE, description="1-based page number"),
     page_size: int = Query(10, ge=1, le=100, description="Rows per page (max 100)"),
     opera: str | None = Query(None, description="Comma-separated airlines, e.g. Grupo LATAM"),
     tipovuelo: str | None = Query(None, description="Comma-separated flight types: I, N"),
