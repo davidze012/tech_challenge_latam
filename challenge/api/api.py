@@ -165,7 +165,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Flight Delay Pipelines API",
     summary="Control plane for the SCL flight-delay training and batch-serving pipelines.",
-    version="1.0.0",
+    version="1.0.2",
     lifespan=lifespan,
 )
 
