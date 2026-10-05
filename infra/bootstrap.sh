@@ -120,7 +120,7 @@ preflight() {
     API_MAX_INSTANCES=2
     ;;
   prod)
-    API_MIN_INSTANCES=1
+    API_MIN_INSTANCES=2
     API_MAX_INSTANCES=5
     ;;
   *) die "ENV must be staging or prod (got '${ENV}')" ;;
