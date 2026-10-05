@@ -9,6 +9,7 @@ Every helper works in both deployment modes:
 from __future__ import annotations
 
 import importlib
+import itertools
 import logging
 import math
 import threading
@@ -44,7 +45,8 @@ WITH filtered AS (
   SELECT OPERA, TIPOVUELO, MES, prediction
   FROM `{table_id}`
   -- BigQuery receives empty array parameters as NULL: IFNULL keeps "empty = no filter".
-  WHERE (IFNULL(ARRAY_LENGTH(@opera), 0) = 0 OR OPERA IN UNNEST(@opera))
+  -- @opera arrives upper-cased: the airline filter is case-insensitive.
+  WHERE (IFNULL(ARRAY_LENGTH(@opera), 0) = 0 OR UPPER(OPERA) IN UNNEST(@opera))
     AND (IFNULL(ARRAY_LENGTH(@tipovuelo), 0) = 0 OR TIPOVUELO IN UNNEST(@tipovuelo))
     AND (IFNULL(ARRAY_LENGTH(@mes), 0) = 0 OR MES IN UNNEST(@mes))
 ),
@@ -263,8 +265,10 @@ def _pipeline_running(pipeline: str) -> bool:
         settings.gcp_project_id, settings.gcp_region, _job_name(pipeline)
     )
     try:
-        executions = _executions_client().list_executions(parent=parent, page_size=5)
-        return any(not execution.completion_time for execution in executions)
+        request = run_v2.ListExecutionsRequest(parent=parent, page_size=5)
+        # Newest first: a running execution is always among the most recent ones.
+        recent = itertools.islice(_executions_client().list_executions(request=request), 5)
+        return any(not execution.completion_time for execution in recent)
     except Exception:
         logger.warning("Could not list executions of %s", parent, exc_info=True)
         return False
@@ -336,8 +340,10 @@ def _query_predictions(
     """Return ``{"total_predictions": int, "predictions": [...]}`` for one filtered page.
 
     Results are cached for ``RESULTS_CACHE_TTL_S`` seconds per (page, filters) key.
+    Airlines match case-insensitively, so they travel upper-cased.
     """
-    key = (page, page_size, _normalise(opera), _normalise(tipovuelo), _normalise(mes))
+    airlines = [name.upper() for name in opera] if opera else None
+    key = (page, page_size, _normalise(airlines), _normalise(tipovuelo), _normalise(mes))
     return _results_cache().get_or_compute(key, lambda: _fetch_predictions(*key))
 
 
@@ -403,7 +409,7 @@ def _fetch_predictions_local(
         return {"total_predictions": 0, "delayed": 0, "predictions": []}
     frame = pd.read_csv(path, dtype={"OPERA": "string", "TIPOVUELO": "string", "MES": "Int64"})
     if opera:
-        frame = frame[frame["OPERA"].isin(opera)]
+        frame = frame[frame["OPERA"].str.upper().isin(opera)]
     if tipovuelo:
         frame = frame[frame["TIPOVUELO"].isin(tipovuelo)]
     if mes:

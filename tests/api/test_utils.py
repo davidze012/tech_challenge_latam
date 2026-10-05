@@ -3,12 +3,13 @@
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 from google.api_core.exceptions import NotFound
+from google.cloud import run_v2
 
 from challenge import app
 from challenge.api import api as api_module
@@ -132,11 +133,19 @@ def test_local_query_without_predictions_file_is_empty(local_artifacts):
     }
 
 
-def test_cache_key_ignores_filter_order_and_duplicates(local_artifacts):
+def test_cache_key_ignores_filter_order_case_and_duplicates(local_artifacts):
     with patch.object(utils, "_fetch_predictions", return_value={"x": 1}) as fetch:
         utils._query_predictions(1, 10, ["b", "a"], None, [12, 7, 7])
-        utils._query_predictions(1, 10, ["a", "b"], None, [7, 12])
-    fetch.assert_called_once_with(1, 10, ("a", "b"), (), (7, 12))
+        utils._query_predictions(1, 10, ["A", "b"], None, [7, 12])
+    fetch.assert_called_once_with(1, 10, ("A", "B"), (), (7, 12))
+
+
+def test_local_airline_filter_is_case_insensitive(local_artifacts):
+    PREDICTIONS.to_csv(local_artifacts / "predictions.csv", index=False)
+
+    result = utils._query_predictions(1, 10, ["grupo latam", "SKY AIRLINE"], None, None)
+    assert result["total_predictions"] == 4
+    assert {p["OPERA"] for p in result["predictions"]} == {"Grupo LATAM", "Sky Airline"}
 
 
 def test_local_checks_and_metadata(local_artifacts, tmp_path, monkeypatch):
@@ -242,10 +251,11 @@ def test_gcp_query_is_parameterised(gcp_mode):
     assert "`proj.ds.predictions`" in sql
     assert "`proj.ds.raw_flights`" in sql  # historical context joins the raw table
     assert "Grupo LATAM" not in sql
+    assert "UPPER(OPERA) IN UNNEST(@opera)" in sql
     params = {
         p.name: p for p in client.query_and_wait.call_args.kwargs["job_config"].query_parameters
     }
-    assert params["opera"].values == ["Grupo LATAM"]
+    assert params["opera"].values == ["GRUPO LATAM"]
     assert params["mes"].values == [7]
     assert (params["limit"].value, params["offset"].value) == (20, 40)
     assert params["delay_threshold"].value == 15
@@ -273,10 +283,16 @@ def test_gcp_raw_flights_uses_table_metadata(gcp_mode):
 
 
 def test_gcp_pipeline_running_inspects_executions(gcp_mode):
-    executions = MagicMock()
+    # autospec enforces the real client signature (a bare MagicMock accepts any kwarg).
+    executions = create_autospec(run_v2.ExecutionsClient, instance=True)
     executions.list_executions.return_value = [SimpleNamespace(completion_time=None)]
     with patch.object(utils, "_executions_client", return_value=executions):
         assert utils._pipeline_running("train") is True
+        request = executions.list_executions.call_args.kwargs["request"]
+        assert request.parent.endswith("/jobs/mle-training-prod")
+        assert request.page_size == 5
+        executions.list_executions.return_value = [SimpleNamespace(completion_time="done")]
+        assert utils._pipeline_running("train") is False
         executions.list_executions.side_effect = RuntimeError("api down")
         assert utils._pipeline_running("train") is False
 
@@ -349,6 +365,7 @@ def test_predict_invalidates_cache_and_returns_first_page():
         patch.object(api_module, "_check_model_exists", return_value=True),
         patch.object(api_module, "_submit_and_wait", return_value=SimpleNamespace(name="exec-2")),
         patch.object(api_module, "invalidate_predictions_cache") as invalidate,
+        patch.object(api_module, "model_lineage", return_value=None),
         patch.object(api_module, "_latest_model_version", return_value="run-9"),
         patch.object(
             api_module,
@@ -358,14 +375,49 @@ def test_predict_invalidates_cache_and_returns_first_page():
     ):
         response = client.post("/pipeline/predict")
     assert response.status_code == 200
-    assert response.json()["model_version"] == "run-9"
+    assert response.json()["model_version"] == "run-9"  # no lineage yet: latest model
     invalidate.assert_called_once()
     query.assert_called_once_with(1, 10, None, None, None)
 
 
+def test_predict_reports_the_model_that_made_the_predictions():
+    # A training run promoted run-9 while serving was still using run-8.
+    lineage = {"model_version": "run-8", "trained_at": None, "predicted_at": None, "metrics": {}}
+    with (
+        patch.object(api_module, "_check_model_exists", return_value=True),
+        patch.object(api_module, "_submit_and_wait", return_value=SimpleNamespace(name="exec-3")),
+        patch.object(api_module, "model_lineage", return_value=lineage),
+        patch.object(api_module, "_latest_model_version", return_value="run-9"),
+        patch.object(
+            api_module,
+            "_query_predictions",
+            return_value={"total_predictions": 0, "predictions": []},
+        ),
+    ):
+        body = client.post("/pipeline/predict").json()
+    assert body["model_version"] == body["model"]["model_version"] == "run-8"
+
+
+def test_unexpected_errors_are_answered_with_json():
+    lenient = TestClient(app, raise_server_exceptions=False)
+    with patch.object(api_module, "_query_predictions", side_effect=RuntimeError("bq down")):
+        response = lenient.get("/pipeline/predict/results")
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error"}
+
+
 @pytest.mark.parametrize(
     "query",
-    ["mes=0", "mes=13", "mes=7,x", "tipovuelo=X", "page=0", "page_size=101"],
+    [
+        "mes=0",
+        "mes=13",
+        "mes=7,x",
+        "tipovuelo=X",
+        "page=0",
+        "page=100001",
+        "page=922337203685477582",
+        "page_size=101",
+    ],
 )
 def test_results_rejects_invalid_parameters(query):
     with patch.object(api_module, "_query_predictions") as query_predictions:
